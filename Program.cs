@@ -1,17 +1,27 @@
+using System.Reflection;
+using ApplicationService.Contracts;
 using ApplicationService.Data;
 using ApplicationService.Data.Models;
+using ApplicationService.Events;
+using ApplicationService.Services;
+using MediatR;
 using Microsoft.EntityFrameworkCore;
 
 var builder = WebApplication.CreateBuilder(args);
-builder.Services.AddHttpClient(); // Для отправки HTTP запросов
+builder.Services.AddHttpClient();
 
-var connectionString = builder.Configuration.GetConnectionString("Postgres"); // Настройка PostgreSQL
+var connectionString = builder.Configuration.GetConnectionString("Postgres");
 builder.Services.AddDbContext<ApplicationDbContext>(options => options.UseNpgsql(connectionString));
 
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 
 builder.Services.AddScoped<IApiGatewayService, ApiGatewayService>();
+builder.Services.AddSingleton<KafkaProducerService>();
+
+// Add MediatR
+builder.Services.AddMediatR(cfg => cfg.RegisterServicesFromAssembly(Assembly.GetExecutingAssembly()));
+
 
 var app = builder.Build();
 
@@ -24,7 +34,8 @@ if (app.Environment.IsDevelopment())
 app.UseHttpsRedirection();
 
 // Метод для получения заявки
-app.MapPost("/api/application", async (Application application, ApplicationDbContext db, IApiGatewayService ApiGatewayService) =>
+app.MapPost("/api/application", async (Application application, ApplicationDbContext db, 
+    IApiGatewayService ApiGatewayService , IPublisher publisher) =>
 {
     // Логируем полученные данные в консоль
     Console.WriteLine($"Received application: {application.LoanPurpose}, {application.LoanAmount}, {application.LoanTermMonths}");
@@ -34,7 +45,7 @@ app.MapPost("/api/application", async (Application application, ApplicationDbCon
     // Сохраняем заявку в базу данных
     try
     {
-        var existingUser = await db.Users.FirstOrDefaultAsync(u => u.Passport == application.User.Passport);
+        var existingUser = await db.Users.FirstOrDefaultAsync(u => u.Passport.Equals(application.User.Passport));
         if (existingUser == null)
         {
             db.Users.Add(application.User);
@@ -47,14 +58,38 @@ app.MapPost("/api/application", async (Application application, ApplicationDbCon
         {
             Console.WriteLine($"Заявка не прошла анти-фрод проверку: {validationResult.StatusCode}");
             application.Status = "Отклонена";
+            await db.SaveChangesAsync(); 
         }
         else
         {
             application.Status = "Создана";
             db.Applications.Add(application);
+            await db.SaveChangesAsync(); 
+            
             Console.WriteLine($"Заявка прошла проверку: {validationResult.StatusCode}");
+            
+            // Publish ApplicationSubmittedEvent
+            var applicationSubmittedEvent = new ApplicationSubmittedEvent(
+                application.User.FirstName,
+                application.User.LastName,
+                application.User.Age,
+                application.User.Passport,
+                application.User.INN,
+                application.User.Gender,
+                application.User.MaritalStatus,
+                application.User.Education,
+                application.User.EmploymentType,
+                application.LoanPurpose,
+                application.LoanAmount,
+                application.LoanTermMonths,
+                application.LoanType,
+                application.InterestRate,
+                application.PaymentType
+            );
+
+            await publisher.Publish(applicationSubmittedEvent); // Publish the event
+            Console.WriteLine("ApplicationSubmittedEvent published.");  //Log that the message was published.
         }
-        await db.SaveChangesAsync(); 
     }
     catch (Exception e)
     {
@@ -67,49 +102,3 @@ app.MapPost("/api/application", async (Application application, ApplicationDbCon
 });
 
 app.Run();
-
-public interface IApiGatewayService
-{
-    Task<HttpResponseMessage> CheckAntifraudAsync(Application application);
-}
-
-public class ApiGatewayService : IApiGatewayService
-{
-    private readonly IHttpClientFactory _clientFactory;
-    private readonly ILogger<ApiGatewayService> _logger;
-    private readonly IConfiguration _configuration;
-    
-    public ApiGatewayService(IHttpClientFactory clientFactory, ILogger<ApiGatewayService> logger, IConfiguration configuration)
-    {
-        _clientFactory = clientFactory;
-        _logger = logger;
-        _configuration = configuration;
-    }
-
-    public async Task<HttpResponseMessage> CheckAntifraudAsync(Application application)
-    {
-        var client = _clientFactory.CreateClient("ApiGatewayClient"); // Use the named client
-        var apiGatewayUrl = _configuration.GetConnectionString("ApiGateway"); // Read from configuration (appsettings.json)
-
-        try
-        {
-            var response = await client.PostAsJsonAsync($"{apiGatewayUrl}/api/validate/application", application);
-            return response;
-        }
-        catch (HttpRequestException ex)
-        {
-            _logger.LogError($"Error calling ApiGateway: {ex.Message}", ex);
-            // Consider implementing retry logic here.
-            return new HttpResponseMessage(System.Net.HttpStatusCode.InternalServerError);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError($"Unexpected error calling ApiGateway: {ex.Message}", ex);
-            return new HttpResponseMessage(System.Net.HttpStatusCode.InternalServerError);
-        }
-    }
-}
-
-
-
-

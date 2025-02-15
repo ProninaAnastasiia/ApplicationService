@@ -1,8 +1,10 @@
 using System.Reflection;
+using System.Text.Json;
 using ApplicationService.Contracts;
 using ApplicationService.Data;
 using ApplicationService.Data.Models;
 using ApplicationService.Events;
+using ApplicationService.Messages;
 using ApplicationService.Services;
 using MediatR;
 using Microsoft.EntityFrameworkCore;
@@ -99,6 +101,18 @@ app.MapPost("/api/application", async (Application application, ApplicationDbCon
     
     // Возвращаем успешный ответ
     return Results.Ok("Application processed successfully.");
+});
+
+app.MapGet("/api/test/raise-message", async (KafkaProducerService kafkaProducerService) =>
+{
+    var airportCreatedMessage = new ApplicationSubmittedMessage("Борис", "Тестовый", 
+        23, "112233445566", "9999999999", "мужской", "эээ", 
+        "высшее", "работник компании", "на айфон", 100000 , 
+        3, "потребительский", 16,
+        "дифф",new DateTimeOffset(DateTime.UtcNow).ToUnixTimeSeconds().ToString());
+        
+    await kafkaProducerService.ProduceAsync("ApplicationSubmitted", JsonSerializer.Serialize(airportCreatedMessage));
+    return "Hello World!";
 });
 
 app.Run();
